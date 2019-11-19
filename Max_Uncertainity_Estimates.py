@@ -45,7 +45,7 @@ def areaCalc(temp_buff, area_dic):
         bp_area = bp.geometry().area()
         bp['buff_area'] = bp_area
         #Omit records that have an uncertainity larger than average huc 8 distance centroid -> edge
-        if float(bp['maximum_uncertainty_estimate'] > 28139) or str(bp['donor_state']) != "Texas":
+        if float(bp['maximum_uncertainty_estimate'] > 28139):
             bp['sus_calc'] = "Omitted"
         else:
             area_dic[bp['id']] = bp_area
@@ -172,7 +172,7 @@ if not utm15.isValid():
     print("UTM14 not valid")    
 
 #Total Point Layer (TRACK 3 DATA HERE)
-uri_pl = "file:///D:/Colton_Data/Suspect_Calculator/track3_specimens.csv?delimiter=%s&xField=%s&yField=%s" % (",","longitude","latitude")
+uri_pl = "file:///D:/Colton_Data/Suspect_Calculator/track3_spec_TX.csv?delimiter=%s&xField=%s&yField=%s" % (",","longitude","latitude")
 total_p = QgsVectorLayer(uri_pl,"total_points","delimitedtext")
 if not total_p.isValid():
     print("Point layer failed")
