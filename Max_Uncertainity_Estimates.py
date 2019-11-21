@@ -15,6 +15,7 @@ def pointSelector(utm, proj):
     print(len(selection))
     total_p.selectByIds([k.id() for k in selection])
     #Adds selected point as 'utm14points'
+    qgis.utils.iface.setActiveLayer(total_p)
     layer = iface.activeLayer()
     new_layer_p = layer.materialize(QgsFeatureRequest().setFilterFids(total_p.selectedFeatureIds()))
     new_layer_p.setName('utmpoints')
@@ -29,14 +30,27 @@ def pointBuffer(utm_ps, utmp_name):
     mem_str = "memory:"+ str(utmp_name)
     print(mem_str)
     #Utilizes "Vector Geometry - Buffer" with variable buffer value
-    buff_result = processing.run('native:buffer', {'INPUT': utm_ps, "DISTANCE":QgsProperty.fromExpression('"maximum_uncertainty_estimate"'),"OUTPUT": mem_str})
+    buff_result = processing.run('native:buffer', {'INPUT': utm_ps, "DISTANCE":QgsProperty.fromExpression('"coordinateUncertaintyInMeters"'),"OUTPUT": mem_str})
     return buff_result['OUTPUT']
 
-def createFields(buffPs, bDP):
+def createFields(pls, pDP):
     #Add empty buffered area field "buff_area"
-    buff_area = [QgsField('buff_area', QVariant.Double),QgsField('sus_calc',QVariant.String),QgsField('nativity',QVariant.String)]
-    bDP.addAttributes(buff_area)
-    buffPs.updateFields()
+    nFields = [QgsField('buff_area', QVariant.Double),QgsField('sus_calc',QVariant.String),QgsField('nativity',QVariant.String), QgsField('parentHuc',QVariant.String)]
+    pDP.addAttributes(nFields)
+    pls.updateFields()
+    
+def hucCalc(pointL, huc8):
+    print("Parent HUC?")
+    pointL.startEditing()
+    for point in pointL.getFeatures():
+        pGeo =  point.geometry()
+        for huc in huc8.getFeatures():
+            hucGeo = huc.geometry()
+            if hucGeo.contains(pGeo):
+                point['parentHuc'] = huc['SUBBASIN']
+                pointL.updateFeature(point)
+                break
+    pointL.commitChanges()
     
 #Adds area of buffered point to attribute table and determines if a record should be omitted from calculation
 def areaCalc(temp_buff, area_dic):
@@ -45,14 +59,15 @@ def areaCalc(temp_buff, area_dic):
         bp_area = bp.geometry().area()
         bp['buff_area'] = bp_area
         #Omit records that have an uncertainity larger than average huc 8 distance centroid -> edge
-        if float(bp['maximum_uncertainty_estimate'] > 28139):
+        if float(bp['coordinateUncertaintyInMeters'] > 28139):
             bp['sus_calc'] = "Omitted"
         else:
-            area_dic[bp['id']] = bp_area
+            area_dic[bp['catalogNumber']] = bp_area
         temp_buff.updateFeature(bp)
     temp_buff.commitChanges()
 
 def clipPoints(buff_ps ,huc8_utm,cDP,clipped_ps):
+    buff_ps.startEditing()
     for huc8 in huc8_utm.getFeatures():
         hucGeo = huc8.geometry()
         hucName = str(huc8["SUBBASIN"])
@@ -60,11 +75,17 @@ def clipPoints(buff_ps ,huc8_utm,cDP,clipped_ps):
         hucPoints = []
         for point in buff_ps.getFeatures():
             pGeo = point.geometry()
-            pHuc = point["huc8_name"]
-            pError = float(point["maximum_uncertainty_estimate"])
+            pHuc = point['parentHuc']
+            pError = float(point["coordinateUncertaintyInMeters"])
+            taxon = str(point['genus']) +" "+ str(point['species'])
             #If point is supposed to be within HUC8  &  if point has less than 28139 meters in error (Taken from Wylie Centroid error determination) add to list 
-            if(pHuc == hucName and pError < 28139):
+            if( pHuc == hucName and pError < 28139):
                 hucPoints.append(point)
+                if hucName not in unique_species:
+                    unique_species[hucName] = []
+                if taxon not in unique_species[hucName]:
+                    point['sus_calc'] = "Suspect (First)"
+                    buff_ps.updateFeature(point)
         if(len(hucPoints) != 0 ):
             print(hucName + " has " + str(len(hucPoints)) + " point(s) within it, calculating now")
 
@@ -101,13 +122,14 @@ def clipPoints(buff_ps ,huc8_utm,cDP,clipped_ps):
             QgsProject.instance().removeMapLayer(temp_clippingpoints)
             QgsProject.instance().removeMapLayer(temp_clipped_ps)
             QgsProject.instance().removeMapLayer(temp_clippinghuc)
-
+    buff_ps.commitChanges()
+    
 def clAreaCalc(clip_ps, clip_dic):
     clip_ps.startEditing()
     for cp in clip_ps.getFeatures():
         cp_area = cp.geometry().area()
         cp['buff_area'] = cp_area
-        clip_dic[cp['id']] = cp_area
+        clip_dic[cp['catalogNumber']] = cp_area
         clip_ps.updateFeature(cp)
     clip_ps.commitChanges()
     
@@ -115,18 +137,20 @@ def areaDiff(clipped_ps,buff_areas,clipped_areas):
     bcount = 0
     clipped_ps.startEditing()
     for bps in clipped_ps.getFeatures():
-        bp_id = bps['id']
+        bp_id = bps['catalogNumber']
         buff_area = float(buff_areas[bp_id])
         clip_area = float(clipped_areas[bp_id])
+        taxon = str(bps['genus']) + str(bps['species'])
         if bcount < 10:
             print(str(clip_area) + " is the clipped value for " + str(bp_id))
             print(str(buff_area) + " is the normal value for " + str(bp_id))
             bcount += 1
         like_val = ((buff_area - clip_area )/ buff_area) * 100
-        if like_val >= 25:
-            bps['sus_calc'] = "Possibly Suspect"
-        else:
-            bps['sus_calc'] = "Not Suspect"
+        if bps['sus_calc'] != "Suspect (First)":
+            if like_val >= 25:
+                bps['sus_calc'] = "Possibly Suspect"
+            else:
+                bps['sus_calc'] = "Not Suspect"
         clipped_areas.pop(bp_id)
         buff_areas.pop(bp_id)
         clipped_ps.updateFeature(bps)
@@ -137,7 +161,7 @@ def firstSus(buffL):
     buffL.startEditing()
     #Adds omitted fish to the layer
     for p in buffL.getFeatures():
-        p_id = p['id']
+        p_id = p['catalogNumber']
         if p_id in sus_l:
             p['sus_calc'] = sus_l[p_id]
             sus_l.pop(p_id)
@@ -172,15 +196,26 @@ if not utm15.isValid():
     print("UTM14 not valid")    
 
 #Total Point Layer (TRACK 3 DATA HERE)
-uri_pl = "file:///D:/Colton_Data/Suspect_Calculator/track3_spec_TX.csv?delimiter=%s&xField=%s&yField=%s" % (",","longitude","latitude")
+uri_pl = "file:///D:/Colton_Data/Suspect_Calculator/track3_spec_TX.csv?delimiter=%s&xField=%s&yField=%s" % (",","decimalLongitude","decimalLatitude")
 total_p = QgsVectorLayer(uri_pl,"total_points","delimitedtext")
 if not total_p.isValid():
-    print("Point layer failed")
+    print("Point layer failed. Make sure your upload adheres to Darwin Core standards.")
+  
+QgsProject.instance().addMapLayer(total_p)   
+layer = iface.activeLayer()
+fields = layer.fields()
+field_names = [field.name() for field in fields]
+darwinCoreFields = ["catalogNumber","genus","species","decimalLatitude","decimalLongitude","coordinateUncertaintyInMeters"]
+print(field_names)
+
+for dcN in darwinCoreFields:
+    if dcN not in field_names:
+        errMess = "The " + dcN + " field cannot be found. Please make sure your upload adheres to Darwin Core standards."
+        raise QgsProcessingException(errMess)
      
 QgsProject.instance().addMapLayer(utm13)     
 QgsProject.instance().addMapLayer(utm14)
 QgsProject.instance().addMapLayer(utm15)
-QgsProject.instance().addMapLayer(total_p) 
 
 #Project points to UTM 13, 14, or 15
 pl_13 = pointSelector(utm13, "EPSG:32613")
@@ -189,6 +224,10 @@ pl_14 = pointSelector(utm14,"EPSG:32614")
 pl_14.setName('utm14points')
 pl_15 = pointSelector(utm15,"EPSG:32615")
 pl_15.setName('utm15points')
+
+dpp13 = pl_13.dataProvider()
+dpp14 = pl_14.dataProvider()
+dpp15 = pl_15.dataProvider()
 
 #Add reprojected point layer (So that we can add buffer)
 QgsProject.instance().addMapLayer(pl_13)
@@ -199,6 +238,31 @@ QgsProject.instance().addMapLayer(pl_15)
 QgsProject.instance().removeMapLayer(utm13)
 QgsProject.instance().removeMapLayer(utm14)
 QgsProject.instance().removeMapLayer(utm15)
+
+#Add in HUC8 layers
+huc8_utm13 = QgsVectorLayer("D:/Colton_Data/Suspect_Calculator/HUC8/HUC8_UTM13.shp","huc8TX13","ogr")
+if not huc8_utm13.isValid():
+    print("HUC813 not valid")
+huc8_utm14 = QgsVectorLayer("D:/Colton_Data/Suspect_Calculator/HUC8/HUC8_UTM14.shp","huc8TX14","ogr")
+if not huc8_utm14.isValid():
+    print("HUC814 not valid")
+huc8_utm15 = QgsVectorLayer("D:/Colton_Data/Suspect_Calculator/HUC8/HUC8_UTM15.shp","huc8TX15","ogr")
+if not huc8_utm15.isValid():
+    print("HUC815 not valid")
+    
+#Create generated fields "buffered area" "suspect status" "nativity"
+createFields(pl_13,dpp13)
+createFields(pl_14,dpp14)
+createFields(pl_15,dpp15)
+
+QgsProject.instance().addMapLayer(huc8_utm13)
+QgsProject.instance().addMapLayer(huc8_utm14)
+QgsProject.instance().addMapLayer(huc8_utm15)
+
+print("Calculating Parent HUC8")
+hucCalc(pl_13,huc8_utm13)
+hucCalc(pl_14,huc8_utm14)
+hucCalc(pl_15,huc8_utm15)
 
 #Buffer all UTM Point Layers
 buff13 = pointBuffer(pl_13, "UTM13_Buffer")
@@ -213,10 +277,27 @@ QgsProject.instance().addMapLayer(buff13)
 QgsProject.instance().addMapLayer(buff14)
 QgsProject.instance().addMapLayer(buff15)
 
-#Create generated fields "buffered area" "suspect status" "nativity"
-createFields(buff13,dp13)
-createFields(buff14,dp14)
-createFields(buff15,dp15)
+
+############Determine if the fish has already been found within the huc, by checking those that are already possibly suspect
+#Generate List of Unique Species for Huc
+track2_data = "file:///D:/Colton_Data/Suspect_Calculator/FlatFileFOTX3-29-18.csv?delimiter=%s&xField=%s&yField=%s" % (",","longitude","latitude")
+track2_p = QgsVectorLayer(track2_data,"total_points","delimitedtext")
+if not track2_p.isValid():
+    print("Track2 Point layer failed")
+    
+unique_species ={}
+
+for point in track2_p.getFeatures():
+    pTaxon = point['full_name']
+    pHuc = point['huc8_name']
+    if pHuc not in unique_species:
+        unique_species[pHuc] = []
+    if pTaxon not in unique_species[pHuc]:
+        unique_species[pHuc].append(pTaxon)
+
+print(unique_species['Howard Draw'])
+
+##########################################################
 
 #Init dicts for comparing areas
 b13_areas = {}
@@ -224,24 +305,10 @@ b14_areas = {}
 b15_areas = {}
 
 #Calculate Area of Buffered Points
+print("Calculating Buffers")
 areaCalc(buff13,b13_areas)
 areaCalc(buff14,b14_areas)
 areaCalc(buff15,b15_areas)
-    
-#Add in HUC8 layers
-huc8_utm13 = QgsVectorLayer("D:/Colton_Data/Suspect_Calculator/HUC8/HUC8_UTM13.shp","huc8TX13","ogr")
-if not huc8_utm13.isValid():
-    print("HUC813 not valid")
-huc8_utm14 = QgsVectorLayer("D:/Colton_Data/Suspect_Calculator/HUC8/HUC8_UTM14.shp","huc8TX14","ogr")
-if not huc8_utm14.isValid():
-    print("HUC814 not valid")
-huc8_utm15 = QgsVectorLayer("D:/Colton_Data/Suspect_Calculator/HUC8/HUC8_UTM15.shp","huc8TX15","ogr")
-if not huc8_utm15.isValid():
-    print("HUC815 not valid")
-
-QgsProject.instance().addMapLayer(huc8_utm13)
-QgsProject.instance().addMapLayer(huc8_utm14)
-QgsProject.instance().addMapLayer(huc8_utm15)
 
 #Creates empty layers to append clipped polygons to
 clipped13 = QgsVectorLayer("Polygon?crs=" + "EPSG:32613", 'clipped13','memory')
@@ -259,6 +326,7 @@ cdp15 = clipped15.dataProvider()
 cdp15.addAttributes(buff15.fields())
 clipped15.updateFields()
 
+print("Clipping Points")
 #Clips point if inside HUC
 clipPoints(buff13,huc8_utm13,cdp13,clipped13)
 clipPoints(buff14,huc8_utm14,cdp14,clipped14)
@@ -273,13 +341,18 @@ cl_areas13 = {}
 cl_areas14 = {}
 cl_areas15 = {}
 
+print("Clipped Area Calc")
+
 #Calculate new area for clipped guys
 clAreaCalc(clipped13, cl_areas13)
 clAreaCalc(clipped14, cl_areas14)
 clAreaCalc(clipped15, cl_areas15)
 
+
 #For adding suspect results to final point layer
 sus_l = {}
+
+print("Checking uncertainty area")
 
 #Determine if the area of the point that lies within the huc is >=75%
 areaDiff(clipped13,b13_areas,cl_areas13)
@@ -292,38 +365,12 @@ firstSus(buff15)
 
 ### THE RESULTING LAYER OF ^^^ TEMP BUFF will have empty records for duplicates & those located in West San Antonio Bay
 
-##HERE USE TRACK 1 & 2 Flat File!
 
-############Determine if the fish has already been found within the huc, by checking those that are already possibly suspect
-#Generate List of Unique Species for Huc
-track2_data = "file:///D:/Colton_Data/Suspect_Calculator/FlatFileFOTX3-29-18.csv?delimiter=%s&xField=%s&yField=%s" % (",","longitude","latitude")
-track2_p = QgsVectorLayer(track2_data,"total_points","delimitedtext")
-if not track2_p.isValid():
-    print("Track2 Point layer failed")
-    
-#Import total Huc to check for if a fish has been collected
-huc8_tot = QgsVectorLayer("D:/Colton_Data/Suspect_Calculator/HUC8/HUC8_TX_cca10-10-2019.shp","huc8_total","ogr")
-if not huc8_tot.isValid():
-    print("HUC8tot not valid")
-    
-unique_species ={}
-uFish = []
-for huc in huc8_tot.getFeatures():
-    hName = huc["SUBBASIN"]
-    if hName not in unique_species:
-        #Use clipped features because they will have omitted records removed
-        for pn in track2_p.getFeatures():
-            if pn["full_name"] not in uFish and pn["huc8_name"] == hName:
-                uFish.append(pn["full_name"])
-        unique_species[hName] = uFish  
-    uFish = []
-    
-print(unique_species['Howard Draw'])
+#QgsProject.instance().removeMapLayer(clipped13)
+#QgsProject.instance().removeMapLayer(clipped14)
+#QgsProject.instance().removeMapLayer(clipped15)
 
-QgsProject.instance().removeMapLayer(clipped13)
-QgsProject.instance().removeMapLayer(clipped14)
-QgsProject.instance().removeMapLayer(clipped15)
-
+print("Creating final layer")
 
 final_layer = QgsVectorLayer("Polygon?crs=" + "EPSG:4326", 'final_layer','memory')
 fldp = final_layer.dataProvider()
@@ -339,7 +386,13 @@ QgsProject.instance().removeMapLayer(huc8_utm13)
 QgsProject.instance().removeMapLayer(huc8_utm14)
 QgsProject.instance().removeMapLayer(huc8_utm15)
 
+huc8_tot = QgsVectorLayer("D:/Colton_Data/Suspect_Calculator/HUC8/HUC8_TX_cca10-10-2019.shp","utm14","ogr")
+if not huc8_tot.isValid():
+    print("huc8_tot not valid")
+    
+QgsProject.instance().addMapLayer(huc8_tot)
 
+print("Checking neighboring hucs")
 #For any point already "Possibly Suspect" Clip the hucs underneath to a memory layer then check if taxon in buffered point is in all of the hucs
 qgis.utils.iface.setActiveLayer(huc8_tot)
 layer = iface.activeLayer()
@@ -349,7 +402,7 @@ final_layer.startEditing()
 for pp in final_layer.getFeatures():
     if pp['sus_calc'] == "Possibly Suspect":
         pp_geom = pp.geometry()
-        pp_taxon = pp['full_name']
+        pp_taxon = str(pp['genus']) + str(pp["species"])
         for feat in huc8_tot.getFeatures():
             if pp_geom.intersects(feat.geometry()):
                 int_hs.append(feat["SUBBASIN"])
