@@ -181,6 +181,10 @@ def projectWGS84(buffL):
     QgsProject.instance().removeMapLayer(buffL)
 
 ### MAIN ################################################################################################
+########################################################################################################
+########################################################################################################
+########################################################################################################
+
 #Import all UTM Vector Layers for coord projection
 #UTM13 Layer
 utm13 = QgsVectorLayer("D:/Colton_Data/Suspect_Calculator/Shapefiles/UTM13N.shp","utm13","ogr")
@@ -289,6 +293,7 @@ unique_species ={}
 
 for point in track2_p.getFeatures():
     pTaxon = point['full_name']
+    pSuspect = point['suspect']
     pHuc = point['huc8_name']
     if pHuc not in unique_species:
         unique_species[pHuc] = []
@@ -409,7 +414,7 @@ for pp in final_layer.getFeatures():
         #Checks list of unique species for each huc that it intersected with
         for huc in int_hs:
             if pp_taxon not in unique_species[huc]:
-                pp['sus_calc'] = "New Suspect"
+                pp['sus_calc'] = "Locality Suspect"
                 break
             else:
                 pp['sus_calc'] = "Not Suspect (UTM-TX EDGE)"
@@ -417,10 +422,65 @@ for pp in final_layer.getFeatures():
     int_hs = []
 final_layer.commitChanges()
 
-QgsProject.instance().addMapLayer(huc8_tot)
-QgsProject.instance().addMapLayer(final_layer)
-
 QgsProject.instance().removeMapLayer(pl_13)
 QgsProject.instance().removeMapLayer(pl_14)
 QgsProject.instance().removeMapLayer(pl_15)
 
+# RANGE NATIVITY CALC
+
+#Ranges
+nrs= "file:///D:/Colton_Data/Suspect_Calculator/native_ranges.csv?delimiter=,"
+native_ranges = QgsVectorLayer(nrs,"native_ranges","delimitedtext")
+if not native_ranges.isValid():
+    print("Native_Ranges Failed")
+    
+nr_dic_pn = {}
+nr_dic_nat = {}
+
+for n in native_ranges.getFeatures():
+    nHuc = n['huc']
+    nTaxon = n['taxon']
+    nStatus = n['status']
+    if nStatus == "Possibly native":
+        if nHuc not in nr_dic_pn:
+            nr_dic_pn[nHuc] = []
+        if nTaxon not in nr_dic_pn[nHuc]:
+            nr_dic_pn[nHuc].append(nTaxon)
+    elif nStatus == "Native":
+        if nHuc not in nr_dic_nat:
+            nr_dic_nat[nHuc] = []
+        if nTaxon not in nr_dic_nat[nHuc]:
+            nr_dic_nat[nHuc].append(nTaxon)
+        
+print(nr_dic_pn['Carrizo'])
+print(nr_dic_nat['Carrizo'])
+
+
+final_layer.startEditing()
+
+for p in final_layer.getFeatures():
+    hucN = False
+    hucPN = False
+    pHuc = p['parentHuc']
+    pTaxon = str(p['genus']) + " " + str(p['species'])
+    if pHuc in nr_dic_pn:
+        if pTaxon in nr_dic_pn[pHuc]:
+            p['nativity'] = "Possibly native"
+        else:
+            hucPN =True
+    if pHuc in nr_dic_nat:
+        if pTaxon in nr_dic_nat[pHuc]:
+            p['nativity'] = "Native"
+        else:
+            hucN = True
+    if hucN and hucPN:
+        p['nativity'] = "Non-Native"
+    if pHuc not in nr_dic_pn and pHuc not in nr_dic_nat:
+        p['nativity'] = "HUC not analyzed"
+    final_layer.updateFeature(p)
+final_layer.commitChanges()
+
+QgsProject.instance().removeMapLayer(native_ranges) 
+
+QgsProject.instance().addMapLayer(huc8_tot)
+QgsProject.instance().addMapLayer(final_layer)
