@@ -8,5 +8,5 @@ QGIS Plugin for determining suspect status of incoming specimen records - FOTX
 3. Indeterminate Georeference: Georeference error extends into neighboring subbasins where species has yet to be found
 
 In many cases this tool reduces the number of records in need of manual assessment by over 75%. 
-Highlights collecting events that would be overlooked due to proximity to well known events. 
+Highlights collecting events that would be overlooked due to proximity to collection hot spot. 
 Increase rate and quality of data publishing.
